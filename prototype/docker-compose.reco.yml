@@ -1,0 +1,31 @@
+# Uso: docker compose -f docker-compose.yml -f docker-compose.reco.yml up --build
+# Agrega el recomendador (API) y el worker del generador, compartiendo la base.
+x-reco-env: &reco-env
+  RECO_DB_PATH: /data/reco.db
+  RECO_JWT_SECRET: ${RECO_JWT_SECRET:-dev-secret-change-me}
+  RECO_DEV_TOKEN_ENDPOINT: ${RECO_DEV_TOKEN_ENDPOINT:-true}
+  RECO_CYCLE_SECONDS: ${RECO_CYCLE_SECONDS:-60}
+  RECO_TTL_SECONDS: ${RECO_TTL_SECONDS:-600}
+  RECO_TOP_K: ${RECO_TOP_K:-10}
+
+services:
+  reco-api:
+    build: ./recommender
+    environment: *reco-env
+    ports: ["8100:8100"]
+    volumes: ["reco-data:/data"]
+  reco-generator:
+    build: ./recommender
+    command: ["python", "-m", "trotamundos_reco.generator"]
+    environment: *reco-env
+    volumes: ["reco-data:/data"]
+    depends_on: [reco-api]
+  reco-seed:
+    build: ./recommender
+    command: ["python", "-m", "trotamundos_reco.seed", "--demo"]
+    environment: *reco-env
+    volumes: ["reco-data:/data"]
+    profiles: ["seed"]   # docker compose --profile seed run --rm reco-seed
+
+volumes:
+  reco-data:
