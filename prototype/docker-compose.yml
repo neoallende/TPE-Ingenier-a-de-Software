@@ -1,3 +1,19 @@
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://trotamundos:trotamundos@postgres:5432/trotamundos
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+  PROVIDER_SHARED_SECRET: local-dev-secret-change-me
+  WEBHOOK_MAX_SKEW_SECONDS: "300"
+  RABBITMQ_QUEUE: reservation.events
+  RABBITMQ_DLQ: reservation.events.dlq
+
+x-reco-env: &reco-env
+  RECO_DB_PATH: /data/reco.db
+  RECO_JWT_SECRET: ${RECO_JWT_SECRET:-dev-secret-change-me}
+  RECO_DEV_TOKEN_ENDPOINT: ${RECO_DEV_TOKEN_ENDPOINT:-true}
+  RECO_CYCLE_SECONDS: ${RECO_CYCLE_SECONDS:-60}
+  RECO_TTL_SECONDS: ${RECO_TTL_SECONDS:-600}
+  RECO_TOP_K: ${RECO_TOP_K:-10}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -12,6 +28,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     ports: ["5672:5672", "15672:15672"]
@@ -20,10 +37,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
   api:
     build: .
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    env_file: .env
+    environment: *app-env
     ports: ["8000:8000"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -34,25 +52,61 @@ services:
       timeout: 3s
       retries: 20
       start_period: 5s
+
   outbox-relay:
     build: .
     command: python -m app.relay
-    env_file: .env
+    environment: *app-env
     depends_on:
       api: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
+
   event-consumer:
     build: .
     command: python -m app.consumer
-    env_file: .env
+    environment: *app-env
     depends_on:
       api: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
+
   provider-simulator:
     build: .
     command: uvicorn app.simulator:app --host 0.0.0.0 --port 8001
-    env_file: .env
+    environment: *app-env
     ports: ["8001:8001"]
-    depends_on: {api: {condition: service_healthy}}
+    depends_on:
+      api: {condition: service_healthy}
+
+  reco-api:
+    build: ./recommender
+    environment: *reco-env
+    ports: ["8100:8100"]
+    volumes: ["reco_data:/data"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/healthz')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  reco-seed:
+    build: ./recommender
+    command: ["python", "-m", "trotamundos_reco.seed", "--demo"]
+    environment: *reco-env
+    volumes: ["reco_data:/data"]
+    depends_on:
+      reco-api: {condition: service_healthy}
+    restart: "no"
+
+  reco-generator:
+    build: ./recommender
+    command: ["python", "-m", "trotamundos_reco.generator"]
+    environment: *reco-env
+    volumes: ["reco_data:/data"]
+    depends_on:
+      reco-api: {condition: service_healthy}
+      reco-seed: {condition: service_completed_successfully}
+
 volumes:
   postgres_data:
+  reco_data:
