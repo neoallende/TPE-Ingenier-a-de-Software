@@ -1,44 +1,57 @@
 # Módulo de recomendaciones – Iteración 6
 
-Implementa el ADR-020. Núcleo en Python estándar (sin dependencias); solo la capa HTTP usa FastAPI/Pydantic v2.
+Implementa el ADR-020. Núcleo en Python estándar; solo la capa HTTP usa FastAPI/Pydantic v2.
 
-## Puesta en marcha
+## Puesta en marcha integrada
+
+Desde `prototype/`, levantar todos los servicios (reservas + recomendador) con:
+
 ```bash
-cd prototype
-docker compose -f docker-compose.yml -f docker-compose.reco.yml up --build -d
-docker compose -f docker-compose.yml -f docker-compose.reco.yml --profile seed run --rm reco-seed
+docker compose up --build -d
+```
 
-# token de desarrollo (solo con RECO_DEV_TOKEN_ENDPOINT=true)
+El Compose principal inicia automáticamente la API de recomendaciones, carga el catálogo y los datos demo, y luego inicia el generador periódico. No ejecutar `docker-compose.reco.yml` por separado: el recomendador ya forma parte de `docker-compose.yml`.
+
+Detener todo:
+
+```bash
+docker compose down
+```
+
+Borrar también los datos persistidos:
+
+```bash
+docker compose down -v
+```
+
+## Probar la API
+
+Token de desarrollo (solo con `RECO_DEV_TOKEN_ENDPOINT=true`):
+
+```bash
 TOKEN=$(curl -s -X POST localhost:8100/dev/token -H 'content-type: application/json' \
   -d '{"sub":"demo-lujo","role":"user"}' | python -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 curl -s localhost:8100/recommendations/me -H "authorization: Bearer $TOKEN"
 ```
-Sin Docker: `pip install -r requirements.txt`, `export RECO_JWT_SECRET=...`, `python -m trotamundos_reco.seed --demo`,
-`uvicorn trotamundos_reco.api:create_app --factory --port 8100` y, en otra terminal, `python -m trotamundos_reco.generator`.
+
+Swagger: http://localhost:8100/docs
 
 ## Tests
+
 ```bash
-cd prototype/recommender && python -m unittest discover -s tests -t . -v
+cd recommender && python -m unittest discover -s tests -t . -v
 ```
 
-## Integración con el prototipo existente (puntos a revisar)
-1. **Montar en el FastAPI actual** (opcional, en vez de `reco-api`):
-   `app.include_router(create_router(RecommenderService(SqlStore(Database(path)), settings), settings))`.
-2. **Reservas con `user_id` y `accommodation_id`** (ADR-020 D3). Hay que:
-   - agregar ambos campos al comando/evento de creación de reserva y a la proyección;
-   - si la proyección vive en PostgreSQL: `ALTER TABLE <tabla> ADD COLUMN user_id TEXT, ADD COLUMN accommodation_id INTEGER;`
-   - alimentar la tabla `reservation_projection` de este módulo desde el handler de la proyección
-     (`SqlStore.upsert_reservation`) o apuntar `SqlStore` a la tabla existente.
-   Los estados contados como "reserva válida" se configuran con `RECO_VALID_RESERVATION_STATUSES`.
-3. **Base de datos**: el prototipo usa SQLite (WAL) en un volumen. Para PostgreSQL hay que cambiar el
-   driver, los placeholders (`?` → `%s`) e `INSERT OR IGNORE` → `INSERT ... ON CONFLICT DO NOTHING` (confinado en `db.py`).
-4. **Secreto JWT**: `RECO_JWT_SECRET` es obligatorio; el endpoint `/dev/token` debe estar apagado fuera de desarrollo.
+## Integración de datos pendiente
+
+La ejecución conjunta de los contenedores no implica todavía integración de datos. El recomendador usa SQLite y un catálogo/reservas demo propios; el prototipo de reservas usa PostgreSQL. Para que las recomendaciones se calculen con reservas reales todavía hay que agregar `user_id` y `accommodation_id` al contrato/evento de reserva y alimentar la proyección del recomendador desde el consumidor o migrar su persistencia a PostgreSQL.
 
 ## Variables de entorno
+
 | Variable | Default | Significado |
 |---|---|---|
 | `RECO_DB_PATH` | `reco.db` | archivo SQLite |
-| `RECO_JWT_SECRET` | (obligatoria) | clave HMAC de los tokens |
+| `RECO_JWT_SECRET` | `dev-secret-change-me` | clave HMAC de los tokens (cambiar fuera de desarrollo) |
 | `RECO_TOKEN_TTL_SECONDS` | 3600 | vigencia de tokens de desarrollo |
 | `RECO_DEV_TOKEN_ENDPOINT` | false | habilita `POST /dev/token` |
 | `RECO_CYCLE_SECONDS` | 60 | frecuencia del generador |
@@ -47,21 +60,17 @@ cd prototype/recommender && python -m unittest discover -s tests -t . -v
 | `RECO_MIN_PROFILE_INTERACTIONS` | 2 | umbral para dejar de ser cold start |
 | `RECO_FEEDBACK_ALPHA` | 0.3 | tasa de aprendizaje del feedback |
 | `RECO_MAX_RETRIES` / `RECO_RETRY_BACKOFF_SECONDS` | 3 / 0.5 | reintentos por usuario |
-| `RECO_WEIGHTS` | todos 1 | p. ej. `stars=1,price=1.5,zone=1,type=0.5,amenities=1` |
+| `RECO_WEIGHTS` | todos 1 | pesos de las características |
 | `RECO_VALID_RESERVATION_STATUSES` | `confirmed,completed` | estados que cuentan como historial |
 
 ## Endpoints
+
 | Método y ruta | Rol | Descripción |
 |---|---|---|
 | `GET /recommendations/me` | user/admin | lista vigente (`status`: `fresh`, `expired`, `none`) |
-| `POST /feedback` | user/admin | `{feedback_id, accommodation_id, kind: accept\|reject\|rating, rating?}` |
+| `POST /feedback` | user/admin | registrar aceptación, rechazo o puntuación |
 | `GET/PUT /me/constraints` | user/admin | restricciones obligatorias |
 | `GET /me/profile` | user/admin | perfil propio |
-| `GET /admin/users/{id}/profile` | admin | perfil ajeno, **auditado** |
+| `GET /admin/users/{id}/profile` | admin | perfil ajeno, auditado |
 | `GET /admin/audit` | admin | registro de accesos |
 | `POST /dev/token` | – | solo desarrollo |
-
-## Estado de verificación
-Los 25 tests del núcleo (dominio, servicio, persistencia, auth) pasan. La capa `api.py` y los archivos de Docker
-**no se ejecutaron** en el entorno donde se escribieron (sin red para instalar FastAPI ni Docker): compilan, pero
-conviene probarlos una vez integrados.
